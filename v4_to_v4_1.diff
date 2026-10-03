@@ -1,0 +1,538 @@
+--- job_agent_v4_gemini.py	2026-10-03 15:12:47.847583831 +0530
++++ job_agent_v4_1_gemini.py	2026-10-03 15:34:03.290474164 +0530
+@@ -25,6 +25,9 @@
+ CSV_FILE = "top_jobs_v4.csv"
+ 
+ JSON_FILE = "ai_matches_v4.json"
++APPLY_CSV_FILE = "apply_now.csv"
++REVIEW_CSV_FILE = "review.csv"
++SKIPPED_CSV_FILE = "skipped.csv"
+ 
+ PACKAGES_FILE = "application_packages.json"
+ 
+@@ -106,7 +109,8 @@
+ 
+         "backend", "back-end", "server-side", "platform", "distributed systems",
+ 
+-        "infrastructure", "core services", "api", "services engineer"
++        "infrastructure", "core services", "api", "services engineer", "platform engineering",
++        "backend engineering", "distributed systems engineer"
+ 
+     ],
+ 
+@@ -177,59 +181,47 @@
+ 
+ 
+ COUNTRY_PATTERNS = {
+-
+-    "United States": ["united states", "usa", "u.s.", "new york", "california", "texas",
+-
+-                      "washington", "seattle", "san francisco", "bellevue", "austin",
+-
+-                      "mountain view", "palo alto", "chicago", "boston"],
+-
+-    "Canada": ["canada", "toronto", "vancouver", "ontario", "british columbia", "montreal"],
+-
+-    "United Kingdom": ["united kingdom", "uk", "london", "england", "manchester", "edinburgh"],
+-
+-    "Ireland": ["ireland", "dublin", "cork"],
+-
+-    "Germany": ["germany", "berlin", "munich", "hamburg"],
+-
+-    "Netherlands": ["netherlands", "amsterdam"],
+-
+-    "France": ["france", "paris"],
+-
+-    "Spain": ["spain", "madrid", "barcelona"],
+-
+-    "Portugal": ["portugal", "lisbon"],
+-
+-    "Poland": ["poland", "warsaw", "krakow", "kraków"],
+-
+-    "Norway": ["norway", "oslo"],
+-
+-    "Switzerland": ["switzerland", "zurich", "zürich"],
+-
+-    "Sweden": ["sweden", "stockholm"],
+-
+-    "Denmark": ["denmark", "copenhagen"],
+-
+-    "Finland": ["finland", "helsinki"],
+-
+-    "Australia": ["australia", "sydney", "melbourne", "brisbane"],
+-
+-    "New Zealand": ["new zealand", "auckland", "wellington"],
+-
+-    "Singapore": ["singapore"],
+-
+-    "UAE": ["uae", "united arab emirates", "dubai", "abu dhabi"],
+-
+-    "Japan": ["japan", "tokyo"],
+-
+-    "South Korea": ["south korea", "seoul"],
+-
++    "Serbia": ["serbia", "belgrade", "novi sad"],
+     "India": ["india", "bengaluru", "bangalore", "hyderabad", "mumbai", "gurugram",
+-
+-              "gurgaon", "pune", "delhi", "noida", "chennai", "kolkata"],
+-
++              "gurgaon", "pune", "delhi ncr", "delhi", "noida", "chennai", "kolkata"],
++    "United States": ["united states", "usa", "u.s.", "us", "new york", "california", "texas", "washington",
++                      "seattle", "san francisco", "bellevue", "austin", "mountain view", "palo alto",
++                      "chicago", "boston", "denver", "atlanta", "los angeles", "portland", "raleigh"],
++    "Canada": ["canada", "toronto", "vancouver", "ontario", "british columbia", "montreal", "ottawa", "calgary"],
++    "United Kingdom": ["united kingdom", "uk", "london", "england", "manchester", "edinburgh", "scotland", "wales"],
++    "Ireland": ["ireland", "dublin", "cork"],
++    "Germany": ["germany", "berlin", "munich", "hamburg", "frankfurt"],
++    "Netherlands": ["netherlands", "amsterdam", "rotterdam"],
++    "France": ["france", "paris", "lyon"], "Spain": ["spain", "madrid", "barcelona"],
++    "Portugal": ["portugal", "lisbon", "porto"], "Poland": ["poland", "warsaw", "krakow", "kraków"],
++    "Norway": ["norway", "oslo"], "Switzerland": ["switzerland", "zurich", "zürich", "geneva"],
++    "Sweden": ["sweden", "stockholm"], "Denmark": ["denmark", "copenhagen"],
++    "Finland": ["finland", "helsinki"], "Australia": ["australia", "sydney", "melbourne", "brisbane", "perth"],
++    "New Zealand": ["new zealand", "auckland", "wellington"], "Singapore": ["singapore"],
++    "UAE": ["uae", "united arab emirates", "dubai", "abu dhabi"], "Japan": ["japan", "tokyo", "osaka"],
++    "South Korea": ["south korea", "seoul"], "Brazil": ["brazil", "sao paulo", "são paulo", "rio de janeiro"],
++    "Mexico": ["mexico", "mexico city"], "Argentina": ["argentina", "buenos aires"],
++    "South Africa": ["south africa", "cape town", "johannesburg"], "Israel": ["israel", "tel aviv"],
++    "Czechia": ["czechia", "czech republic", "prague"], "Austria": ["austria", "vienna"],
++    "Belgium": ["belgium", "brussels"], "Romania": ["romania", "bucharest"],
++    "Ukraine": ["ukraine", "kyiv", "kiev"],
+ }
+ 
++INDIA_LOCATIONS = ("india", "bengaluru", "bangalore", "hyderabad", "pune", "gurgaon",
++                   "gurugram", "noida", "delhi ncr", "new delhi", "chennai", "mumbai")
++GLOBAL_REMOTE_TERMS = ("worldwide", "work from anywhere", "anywhere in the world", "global remote",
++                       "remote - global", "remote worldwide", "apac", "emea", "cross-border",
++                       "cross border", "india-eligible", "india eligible", "work from india",
++                       "based anywhere", "remote anywhere")
++STRONG_POSITIVE_TERMS = ("java", "spring boot", "backend", "back-end", "microservices",
++                         "distributed systems", "rest api", "rest apis", "kafka", "redis", "sql",
++                         "aws", "concurrency", "concurrent", "platform engineering", "backend engineering")
++NEGATIVE_FUNCTION_TERMS = ("sdet", "software engineer in test", "test automation", "salesforce",
++                           "frontend", "front-end", "mobile engineer", "ios engineer", "android engineer",
++                           "machine learning", "data scientist", "devops", "site reliability", "sre",
++                           "release engineer", "release engineering", "staff engineer", "principal engineer",
++                           "engineering manager", "software engineering manager")
++
+ 
+ 
+ def clean_html(s):
+@@ -249,6 +241,10 @@
+     return (s or "").lower()
+ 
+ 
++def has_term(text, term):
++    return re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", text) is not None
++
++
+ 
+ def fetch_greenhouse(board):
+ 
+@@ -318,27 +314,62 @@
+ 
+     location = norm(job.get("location"))
+ 
+-    for country, patterns in COUNTRY_PATTERNS.items():
+-
+-        if any(re.search(r"\b" + re.escape(p) + r"\b", location) for p in patterns):
+-
+-            return country
+-
+-
+-
+-    # Only use JD text for country when the location field is ambiguous.
+-
++    location_hits = [country for country, patterns in COUNTRY_PATTERNS.items()
++                     if any(re.search(r"\b" + re.escape(p) + r"\b", location) for p in patterns)]
++    if len(location_hits) == 1:
++        return location_hits[0]
++    if len(location_hits) > 1:
++        for country in ("Serbia", "India"):
++            if country in location_hits:
++                return country
++        return "Unknown"
++    # Only use JD text when location itself gives no usable country signal.
+     text = norm(job.get("description"))[:12000]
++    hits = [country for country, patterns in COUNTRY_PATTERNS.items()
++            if any(re.search(r"\b" + re.escape(p) + r"\b", text) for p in patterns)]
++    return hits[0] if len(hits) == 1 else "Unknown"
+ 
+-    hits = []
+ 
+-    for country, patterns in COUNTRY_PATTERNS.items():
++def is_india_location(job):
++    location = norm(job.get("location"))
++    return any(re.search(r"\b" + re.escape(p) + r"\b", location) for p in INDIA_LOCATIONS)
+ 
+-        if any(re.search(r"\b" + re.escape(p) + r"\b", text) for p in patterns):
+ 
+-            hits.append(country)
++def has_sponsorship_or_relocation(job):
++    text = norm((job.get("location") or "") + " " + (job.get("description") or ""))
++    if any(p in text for p in NO_SPONSOR_PATTERNS):
++        relocation = ("relocation support", "relocation assistance", "relocation package", "relocation provided")
++        return any(p in text for p in relocation)
++    return any(p in text for p in SPONSORSHIP_PATTERNS)
+ 
+-    return hits[0] if len(hits) == 1 else "Unknown"
++
++def is_genuine_global_remote(job):
++    text = norm((job.get("location") or "") + " " + (job.get("description") or ""))
++    if not any(p in text for p in REMOTE_PATTERNS):
++        return False
++    scope_words = ("remote", "work", "employ", "candidate", "hire", "based", "eligible",
++                   "location", "country", "timezone", "compatible", "anywhere")
++    for term in GLOBAL_REMOTE_TERMS:
++        start = 0
++        while True:
++            index = text.find(term, start)
++            if index < 0:
++                break
++            context = text[max(0, index - 100):index + len(term) + 100]
++            if any(word in context for word in scope_words):
++                return True
++            start = index + len(term)
++    return False
++
++
++def search_bucket(job):
++    if is_india_location(job) or job.get("country") == "India":
++        return "INDIA_PRIORITY"
++    if has_sponsorship_or_relocation(job):
++        return "GLOBAL_SPONSORSHIP"
++    if is_genuine_global_remote(job):
++        return "GLOBAL_REMOTE"
++    return "LOW_PRIORITY / INELIGIBLE"
+ 
+ 
+ 
+@@ -410,11 +441,9 @@
+ 
+     target = target_role_signal(job, profile)
+ 
+-    technical = any(x in (title + " " + norm(job["description"][:6000]))
+-
+-                     for x in ["java", "spring", "backend", "microservices", "distributed", "platform", "kafka"])
+-
+-    return target or technical or "backend" in families
++    technical = any(x in (title + " " + norm(job["description"][:9000]))
++                    for x in STRONG_POSITIVE_TERMS)
++    return target or technical or "backend" in families or "software" in families
+ 
+ 
+ 
+@@ -434,8 +463,6 @@
+ 
+ 
+ 
+-    # Strong role signal: backend/software/platform. Negative role signal: SDET/frontend/data/ML.
+-
+     role_bonus = 0
+ 
+     if target_role_signal(job, profile):
+@@ -444,11 +471,16 @@
+ 
+     if "backend" in families or "software" in families or "platform" in families:
+ 
+-        role_bonus += 10
+-
+-    if "sdet" in families or "frontend" in families or "ml" in families:
+-
+-        role_bonus -= 35
++        role_bonus += 12
++    positive_hits = [term for term in STRONG_POSITIVE_TERMS if has_term(text, term)]
++    role_bonus += min(36, 3 * len(positive_hits))
++    # Penalize a function mismatch when the title identifies it as the job's focus.
++    negative_hits = [term for term in NEGATIVE_FUNCTION_TERMS if has_term(title, term)]
++    role_bonus -= min(65, 18 * len(negative_hits))
++    experience_values = re.findall(r"\b(\d{1,2})\s*\+?\s*(?:years|yrs)\b", text)
++    max_required_years = max((int(value) for value in experience_values), default=0)
++    if max_required_years > 5.5:
++        role_bonus -= min(35, int((max_required_years - 5.5) * 10))
+ 
+ 
+ 
+@@ -463,6 +495,9 @@
+         "families": families,
+ 
+         "role_bonus": role_bonus,
++        "positive_term_hits": positive_hits,
++        "negative_term_hits": list(dict.fromkeys(negative_hits)),
++        "max_required_years": max_required_years,
+ 
+         "eligibility": eligibility_signal(job),
+ 
+@@ -470,7 +505,7 @@
+ 
+         "remote": any(x in text for x in REMOTE_PATTERNS),
+ 
+-        "experience_hint": re.findall(r"\b(?:[2-9]|10)\\+?\s*(?:years|yrs)\b", text)[:8],
++        "experience_hint": re.findall(r"\b(?:[2-9]|10)\+?\s*(?:years|yrs)\b", text)[:8],
+ 
+     }
+ 
+@@ -480,7 +515,33 @@
+ 
+     f = local_features(job, profile)
+ 
+-    return max(0, min(100, 25 + f["skill_hit_count"] * 2 + f["role_bonus"]))
++    return round(35 + f["skill_hit_count"] * 2.5 + f["role_bonus"])
++
++
++def select_for_analysis(pool_by_bucket, limit):
++    """Use an approximate 70/20/10 split, redistributing empty buckets."""
++    order = ("INDIA_PRIORITY", "GLOBAL_SPONSORSHIP", "GLOBAL_REMOTE")
++    quotas = {"INDIA_PRIORITY": round(limit * 0.70),
++              "GLOBAL_SPONSORSHIP": round(limit * 0.20),
++              "GLOBAL_REMOTE": max(0, limit - round(limit * 0.70) - round(limit * 0.20))}
++    selected = []
++    chosen_ids = set()
++    for bucket in order:
++        take = min(quotas[bucket], len(pool_by_bucket[bucket]))
++        selected.extend(pool_by_bucket[bucket][:take])
++        chosen_ids.update(j["id"] for j in pool_by_bucket[bucket][:take])
++    if len(selected) < limit:
++        for bucket in order:
++            for job in pool_by_bucket[bucket]:
++                if job["id"] not in chosen_ids:
++                    selected.append(job)
++                    chosen_ids.add(job["id"])
++                    if len(selected) >= limit:
++                        break
++            if len(selected) >= limit:
++                break
++    selected.sort(key=lambda j: (order.index(j["search_bucket"]), -j["rough_score"]))
++    return selected[:limit]
+ 
+ 
+ 
+@@ -580,24 +641,29 @@
+ def active_model():
+     return f"{AI_PROVIDER}:{GEMINI_MODEL}"
+ 
+-def fingerprint(job):
++def fingerprint(job, profile, resume):
+     import hashlib
+-    raw = f"{job['title']}|{job['location']}|{job['description']}".encode("utf-8")
++    raw = json.dumps({
++        "job_id": job["id"], "title": job["title"], "location": job["location"],
++        "country": job.get("country"), "description": job["description"],
++        "resume": resume, "profile": profile, "provider": AI_PROVIDER,
++        "model": GEMINI_MODEL,
++    }, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+     return hashlib.sha256(raw).hexdigest()
+ 
+-def get_cached_match(c, job):
++def get_cached_match(c, job, profile, resume):
+     row = c.execute("SELECT job_fingerprint, model, result_json FROM ai_cache WHERE job_id=?", (job["id"],)).fetchone()
+     if not row:
+         return None
+     fp, model, result_json = row
+-    if fp == fingerprint(job) and model == active_model():
++    if fp == fingerprint(job, profile, resume) and model == active_model():
+         try:
+             return json.loads(result_json)
+         except Exception:
+             return None
+     return None
+ 
+-def save_cached_match(c, job, result):
++def save_cached_match(c, job, profile, resume, result):
+     c.execute("""
+         INSERT INTO ai_cache(job_id,job_fingerprint,model,result_json,analyzed_at)
+         VALUES(?,?,?,?,?)
+@@ -606,7 +672,7 @@
+           model=excluded.model,
+           result_json=excluded.result_json,
+           analyzed_at=excluded.analyzed_at
+-    """, (job["id"], fingerprint(job), active_model(), json.dumps(result, ensure_ascii=False),
++    """, (job["id"], fingerprint(job, profile, resume), active_model(), json.dumps(result, ensure_ascii=False),
+           datetime.now(timezone.utc).isoformat()))
+ 
+ def gemini_json(system, payload, temperature=0.1):
+@@ -865,7 +931,7 @@
+ 
+     print("\n" + "=" * 110)
+ 
+-    print("                 GLOBAL AI JOB AGENT — V4")
++    print("                 GLOBAL AI JOB AGENT — V4.1")
+ 
+     print("=" * 110)
+ 
+@@ -904,29 +970,23 @@
+ 
+ 
+ 
+-    candidates = []
+-
++    pool_by_bucket = {"INDIA_PRIORITY": [], "GLOBAL_SPONSORSHIP": [], "GLOBAL_REMOTE": []}
+     for j in all_jobs:
+-
+         j["country"] = detect_country(j)
+-
+         j["eligibility_signal"] = eligibility_signal(j)
+-
++        j["search_bucket"] = search_bucket(j)
+         j["rough_score"] = rough_score(j, profile)
++        if j["search_bucket"] in pool_by_bucket and rough_prefilter(j, profile):
++            pool_by_bucket[j["search_bucket"]].append(j)
+ 
+-        if rough_prefilter(j, profile):
+-
+-            candidates.append(j)
+-
+-
+-
+-    candidates.sort(key=lambda x: x["rough_score"], reverse=True)
+-
+-    candidates = candidates[:AI_ANALYZE_LIMIT]
+-
+-
+-
+-    print(f"\nCollected: {len(all_jobs)} | AI candidates: {len(candidates)}")
++    for jobs in pool_by_bucket.values():
++        jobs.sort(key=lambda x: x["rough_score"], reverse=True)
++    filtered_count = sum(len(jobs) for jobs in pool_by_bucket.values())
++    bucket_counts = {bucket: len(jobs) for bucket, jobs in pool_by_bucket.items()}
++    candidates = select_for_analysis(pool_by_bucket, AI_ANALYZE_LIMIT)
++    analyzed_ids = {j["id"] for j in candidates}
++    print(f"\nCollected: {len(all_jobs)} | candidates after filtering: {filtered_count} | AI selected: {len(candidates)}")
++    print("AI selection mix: " + " | ".join(f"{b}: {sum(j['search_bucket'] == b for j in candidates)}" for b in pool_by_bucket))
+ 
+ 
+ 
+@@ -940,7 +1000,7 @@
+ 
+         try:
+ 
+-            fit = get_cached_match(c, j) if ai_enabled() else None
++            fit = get_cached_match(c, j, profile, resume) if ai_enabled() else None
+ 
+             if fit:
+ 
+@@ -952,7 +1012,7 @@
+ 
+                 if ai_enabled():
+ 
+-                    save_cached_match(c, j, fit)
++                    save_cached_match(c, j, profile, resume, fit)
+ 
+         except Exception as e:
+ 
+@@ -1002,57 +1062,43 @@
+ 
+ 
+ 
+-    with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
+-
+-        w = csv.writer(f)
+-
+-        w.writerow([
+-
+-            "Company", "Role", "Location", "Country", "AI Fit",
+-
+-            "Technical Fit", "Experience Fit", "Role Fit",
+-
+-            "Location Eligibility", "Sponsorship", "Role Family",
+-
+-            "Action", "Strong Matches", "Gaps", "Red Flags", "Apply URL"
+-
+-        ])
+-
+-        for j in results:
+-
+-            fit = j["fit"]
+-
++    def write_jobs_csv(path, jobs):
++        with open(path, "w", newline="", encoding="utf-8") as f:
++            w = csv.writer(f)
+             w.writerow([
+-
+-                j["company"], j["title"], j["location"], j["country"],
+-
+-                fit.get("overall_fit"), fit.get("technical_fit"),
+-
+-                fit.get("experience_fit"), fit.get("role_fit"),
+-
+-                fit.get("location_eligibility"),
+-
+-                fit.get("sponsorship_assessment"),
+-
+-                fit.get("role_family"),
+-
+-                fit.get("action"),
+-
+-                "; ".join(fit.get("strong_matches", [])),
+-
+-                "; ".join(fit.get("gaps", [])),
+-
+-                "; ".join(fit.get("red_flags", [])),
+-
+-                j["url"],
+-
++                "Company", "Role", "Location", "Country", "Search Bucket", "Pre-rank",
++                "AI Fit", "Technical Fit", "Experience Fit", "Role Fit", "Location Eligibility",
++                "Sponsorship", "Role Family", "Action", "Strong Matches", "Gaps", "Red Flags", "Apply URL"
+             ])
++            for j in jobs:
++                fit = j.get("fit", {})
++                w.writerow([
++                    j["company"], j["title"], j["location"], j.get("country", "Unknown"),
++                    j.get("search_bucket", search_bucket(j)), j.get("rough_score", ""),
++                    fit.get("overall_fit", ""), fit.get("technical_fit", ""),
++                    fit.get("experience_fit", ""), fit.get("role_fit", ""),
++                    fit.get("location_eligibility", ""), fit.get("sponsorship_assessment", ""),
++                    fit.get("role_family", ""), fit.get("action", ""),
++                    "; ".join(fit.get("strong_matches", [])), "; ".join(fit.get("gaps", [])),
++                    "; ".join(fit.get("red_flags", [])), j["url"],
++                ])
++
++    write_jobs_csv(CSV_FILE, results)
++    apply_rows = [j for j in results if j["fit"].get("action") == "APPLY_REVIEW"]
++    review_rows = [j for j in results if j["fit"].get("action") == "REVIEW"]
++    ai_skips = [j for j in results if j["fit"].get("action") == "SKIP"]
++    not_analyzed = [j for j in all_jobs if j["id"] not in analyzed_ids]
++    skipped_rows = ai_skips + not_analyzed
++    write_jobs_csv(APPLY_CSV_FILE, apply_rows)
++    write_jobs_csv(REVIEW_CSV_FILE, review_rows)
++    write_jobs_csv(SKIPPED_CSV_FILE, skipped_rows)
+ 
+ 
+ 
+     with open(JSON_FILE, "w", encoding="utf-8") as f:
+ 
+-        json.dump(results, f, indent=2, ensure_ascii=False)
++        json.dump([{k: v for k, v in j.items() if k != "search_bucket"} for j in results],
++                  f, indent=2, ensure_ascii=False)
+ 
+ 
+ 
+@@ -1145,12 +1191,21 @@
+ 
+ 
+     print("-" * 110)
+-
+-    print(f"AI cache hits: {cache_hits}")
+-
+-    print(f"Saved: {CSV_FILE}")
+-
+-    print(f"Saved: {JSON_FILE}")
++    action_counts = {action: sum(j["fit"].get("action") == action for j in results)
++                     for action in ("APPLY_REVIEW", "REVIEW", "SKIP")}
++    print("RUN STATS")
++    print(f"Total scraped             : {len(all_jobs)}")
++    print(f"Candidates after filtering: {filtered_count}")
++    print(f"India candidates          : {bucket_counts['INDIA_PRIORITY']}")
++    print(f"Sponsorship candidates    : {bucket_counts['GLOBAL_SPONSORSHIP']}")
++    print(f"Global remote candidates  : {bucket_counts['GLOBAL_REMOTE']}")
++    print(f"AI analyzed               : {len(results)}")
++    print(f"AI cache hits             : {cache_hits}")
++    print(f"APPLY_REVIEW count        : {action_counts['APPLY_REVIEW']}")
++    print(f"REVIEW count              : {action_counts['REVIEW']}")
++    print(f"SKIP count                : {action_counts['SKIP']}")
++    print(f"Saved: {CSV_FILE}, {APPLY_CSV_FILE}, {REVIEW_CSV_FILE}, {SKIPPED_CSV_FILE}")
++    print(f"Saved: {JSON_FILE} and {DB_FILE}")
+ 
+     if GENERATE_PACKAGES and ai_enabled():
+ 
